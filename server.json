@@ -1,0 +1,65 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.WYRE-AI/yeastar-mcp",
+  "title": "Yeastar P-Series PBX",
+  "description": "MCP server for Yeastar P-Series PBX System API (read-only).",
+  "repository": {
+    "url": "https://github.com/WYRE-AI/yeastar-mcp",
+    "source": "github"
+  },
+  "version": "0.0.0",
+  "websiteUrl": "https://github.com/WYRE-AI/yeastar-mcp",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/wyre-ai/yeastar-mcp:0.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "YEASTAR_PBX_DOMAIN",
+          "description": "This appliance's own domain/IP and port, e.g. https://pbx.example.com:8088. Each customer's PBX is its own instance - there is no shared hosted endpoint.",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "YEASTAR_CLIENT_ID",
+          "description": "OAuth-style Client ID, generated in the PBX web portal under Integrations -> API.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "YEASTAR_CLIENT_SECRET",
+          "description": "OAuth-style Client Secret, generated in the PBX web portal under Integrations -> API.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "MCP_TRANSPORT",
+          "description": "Transport mode for the server. Set to 'stdio' for local CLI use; the image defaults to 'http' for gateway hosting.",
+          "isRequired": false,
+          "default": "stdio",
+          "format": "string"
+        },
+        {
+          "name": "AUTH_MODE",
+          "description": "Credential source: 'env' reads vars locally, 'gateway' expects header injection from the WYRE MCP Gateway.",
+          "isRequired": false,
+          "default": "env",
+          "format": "string"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "description": "Log verbosity: debug, info, warn, error",
+          "isRequired": false,
+          "default": "info",
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
