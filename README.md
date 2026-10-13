@@ -23,7 +23,9 @@ This connector exchanges the Client ID/Secret for a short-lived **access token**
 
 **Token lifetime and caching.** Access tokens expire after **30 minutes**; refresh tokens after 24 hours. Yeastar also caps each application to **8 simultaneous valid tokens**. Because of that cap, this connector does not mint a fresh token on every tool call - `src/client.ts` caches the access token in memory, keyed by appliance + Client ID + Client Secret, and reuses it across calls until it's within 60 seconds of expiring. On a `TOKEN EXPIRED` response (errcode `10004`), it transparently mints a fresh token and retries the failed call exactly once. This is a deliberate deviation from the pattern in this fleet's other connectors (which mint per-request or hold a single static key) - it exists because Yeastar's token model genuinely requires it, not as an optimization for its own sake: without caching, any session making more than 8 tool calls within a 30-minute window would start failing with `MAX LIMITATION EXCEEDED` (errcode `60002`) from Yeastar itself.
 
-In gateway mode, the three credential fields arrive per-request via `X-Yeastar-Pbx-Domain` / `X-Yeastar-Client-Id` / `X-Yeastar-Client-Secret` headers, injected by the Conduit gateway. In local/stdio mode they're read once from `YEASTAR_PBX_DOMAIN` / `YEASTAR_CLIENT_ID` / `YEASTAR_CLIENT_SECRET`.
+In gateway mode, the three credential fields arrive per-request via `X-Yeastar-Pbx-Domain` / `X-Yeastar-Client-Id` / `X-Yeastar-Client-Secret` headers, injected by the Conduit gateway. A `/mcp` request missing any of those headers is rejected with 401 and does not fall back to `YEASTAR_*` in the process environment. In local/stdio mode, and in HTTP `AUTH_MODE=env`, they're read from `YEASTAR_PBX_DOMAIN` / `YEASTAR_CLIENT_ID` / `YEASTAR_CLIENT_SECRET`.
+
+HTTP also requires service-to-service auth. With `CONDUIT_S2S_SECRET` set, every `/mcp` request must include `X-Gateway-S2S`. The header value is `t=<unix seconds>,v1=<hex hmac-sha256>`. The MAC is HMAC-SHA256 over the ASCII message `t=<unix seconds>` (the same `t=` prefix that appears in the header), keyed by `CONDUIT_S2S_SECRET`, and encoded as lowercase hex. The timestamp must be within 300 seconds of the server clock. A missing or invalid header returns 401 before vendor credentials are read. The secret is never written to logs. `/health` and `/healthz` stay unauthenticated and do not read credentials. The stdio transport does not use `CONDUIT_S2S_SECRET`.
 
 **Every request also passes a mandatory `User-Agent: OpenAPI` header** - Yeastar's API rejects requests missing it (errcode `40002`, "PARAMETER ERROR").
 
@@ -43,8 +45,11 @@ In gateway mode, the three credential fields arrive per-request via `X-Yeastar-P
 | `YEASTAR_CLIENT_ID` | OAuth-style Client ID, generated in the PBX web portal under Integrations -> API. |
 | `YEASTAR_CLIENT_SECRET` | OAuth-style Client Secret, generated in the same place. |
 | `MCP_TRANSPORT` | `stdio` (default) or `http`. |
-| `AUTH_MODE` | `env` (default, reads the vars above) or `gateway` (credentials arrive per-request via `X-Yeastar-Pbx-Domain`/`X-Yeastar-Client-Id`/`X-Yeastar-Client-Secret` headers, injected by the Conduit gateway). |
-| `CONDUIT_S2S_SECRET` | When set, the HTTP transport requires a valid `X-Gateway-S2S` header (Conduit sidecar auth) on every `/mcp` request. |
+| `AUTH_MODE` | `env` (default, reads the vars above) or `gateway` (credentials arrive per-request via `X-Yeastar-Pbx-Domain`/`X-Yeastar-Client-Id`/`X-Yeastar-Client-Secret`). Gateway mode returns 401 when any of those headers is missing and never falls back to `YEASTAR_*`. The container image and Compose default to `gateway`. |
+| `CONDUIT_S2S_SECRET` | Required to start the HTTP transport. The process logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `secret`, `replace-me`, `your-s2s-secret`, and the other public example values). Compose will not start when it is unset. Never commit a real value. |
+| `MCP_ALLOW_INSECURE_DEV` | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning, does not enforce `X-Gateway-S2S`, and binds `127.0.0.1` only. A non-loopback `MCP_HTTP_HOST` (including `0.0.0.0`) refuses to start. A known placeholder secret still refuses to start when this flag is set. |
+| `MCP_HTTP_HOST` | Bind address when a real `CONDUIT_S2S_SECRET` is set. Unset keeps the historical `0.0.0.0` bind. The container image and Compose set `0.0.0.0` inside the container and publish the host port on `127.0.0.1`. Without a secret, the insecure-dev bypass listens on `127.0.0.1` only and refuses a non-loopback value. |
+| `MCP_HTTP_PORT` | HTTP port. Defaults to `8080`. |
 | `LOG_LEVEL` | `debug` \| `info` (default) \| `warn` \| `error`. |
 
 ## Tools
@@ -176,15 +181,43 @@ npm install
 npm run build
 npm test
 npm run lint   # tsc --noEmit
+
+# HTTP refuses to start until CONDUIT_S2S_SECRET is set
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" npm run start:http
+
+# Local HTTP only, without a service-to-service secret (binds 127.0.0.1)
+MCP_ALLOW_INSECURE_DEV=1 npm run start:http
 ```
 
 ## Docker
 
+The image listens on `0.0.0.0` inside the container (`MCP_HTTP_HOST`) and defaults to `AUTH_MODE=gateway`. Startup still refuses to run without `CONDUIT_S2S_SECRET`. Publish the port on loopback. In gateway mode, Yeastar credentials arrive on each request as headers; they are not read from the environment.
+
 ```bash
 docker build -t yeastar-mcp .
-docker run -p 8080:8080 \
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -p 127.0.0.1:8080:8080 \
+  yeastar-mcp
+```
+
+Compose refuses to start when `CONDUIT_S2S_SECRET` is unset, sets `AUTH_MODE=gateway`, does not inject `YEASTAR_PBX_DOMAIN` / `YEASTAR_CLIENT_ID` / `YEASTAR_CLIENT_SECRET`, and publishes `127.0.0.1:8080:8080`:
+
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" docker compose up
+```
+
+Single-tenant HTTP (`AUTH_MODE=env`) still requires the S2S secret, then uses the `YEASTAR_*` environment variables. It is separate from the gateway Compose service:
+
+```bash
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -e AUTH_MODE=env \
   -e YEASTAR_PBX_DOMAIN=https://pbx.example.com:8088 \
   -e YEASTAR_CLIENT_ID=... \
   -e YEASTAR_CLIENT_SECRET=... \
+  -p 127.0.0.1:8080:8080 \
   yeastar-mcp
 ```
+
+`X-Gateway-S2S` for either mode is `t=<unix seconds>,v1=<hmac-sha256 hex of the string t=<unix seconds>>`, signed with `CONDUIT_S2S_SECRET`.
