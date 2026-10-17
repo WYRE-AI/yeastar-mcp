@@ -116,6 +116,16 @@ function resolveBindHost(insecureDev: boolean, env: NodeJS.ProcessEnv = process.
   );
 }
 
+/**
+ * Start the streamable HTTP MCP transport.
+ *
+ * Fails closed: refuses to start without a real CONDUIT_S2S_SECRET (placeholders
+ * are rejected). MCP_ALLOW_INSECURE_DEV=1 is the only bypass and binds 127.0.0.1.
+ * Gateway mode returns 401 when credential headers are missing and never falls
+ * back to environment credentials.
+ *
+ * @returns The listening HTTP server.
+ */
 export async function startHttpTransport(): Promise<Server> {
   const { secret: s2sSecret, insecureDev } = resolveS2sSecret();
   const port = parseInt(process.env.MCP_HTTP_PORT || '8080', 10);
@@ -213,6 +223,8 @@ export async function startHttpTransport(): Promise<Server> {
   await new Promise<void>((resolve, reject) => {
     httpServer.once('error', reject);
     httpServer.listen(port, host, () => {
+      httpServer.off('error', reject);
+      httpServer.on('error', (err) => logger.error('HTTP server error', { error: err.message }));
       logger.info(`HTTP streaming server listening on ${host}:${port}`);
       resolve();
     });
