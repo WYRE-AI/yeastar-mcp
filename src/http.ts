@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createServer } from './server.js';
 import { runWithCredentials } from './client.js';
 import { logger } from './utils/logger.js';
+import { MAX_REQUEST_BODY_BYTES } from './input-limits.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
 
 /**
@@ -177,6 +178,22 @@ export async function startHttpTransport(): Promise<Server> {
       return;
     }
 
+    // Body cap runs after S2S and (in gateway mode) the credential check, so
+    // unauthenticated callers always get 401 before 413.
+    const rejectIfOversized = (): boolean => {
+      const contentLength = Number(headerValue(req.headers['content-length']));
+      if (!Number.isFinite(contentLength) || contentLength <= MAX_REQUEST_BODY_BYTES) return false;
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32600, message: `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes` },
+          id: null,
+        }),
+      );
+      return true;
+    };
+
     const handle = async () => {
       // SECURITY-CRITICAL invariant: this transport MUST stay stateless
       // (sessionIdGenerator: undefined + enableJsonResponse: true).
@@ -190,6 +207,7 @@ export async function startHttpTransport(): Promise<Server> {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
+        maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
       });
       res.on('close', () => {
         transport.close();
@@ -213,10 +231,12 @@ export async function startHttpTransport(): Promise<Server> {
         return;
       }
 
+      if (rejectIfOversized()) return;
       await runWithCredentials({ pbxDomain, clientId, clientSecret }, handle);
       return;
     }
 
+    if (rejectIfOversized()) return;
     await handle();
   });
 

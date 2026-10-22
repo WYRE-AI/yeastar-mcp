@@ -27,6 +27,13 @@ In gateway mode, the three credential fields arrive per-request via `X-Yeastar-P
 
 HTTP also requires service-to-service auth. With `CONDUIT_S2S_SECRET` set, every `/mcp` request must include `X-Gateway-S2S`. The header value is `t=<unix seconds>,v1=<hex hmac-sha256>`. The MAC is HMAC-SHA256 over the ASCII message `t=<unix seconds>` (the same `t=` prefix that appears in the header), keyed by `CONDUIT_S2S_SECRET`, and encoded as lowercase hex. The timestamp must be within 300 seconds of the server clock. A missing or invalid header returns 401 before vendor credentials are read. The secret is never written to logs. `/health` and `/healthz` stay unauthenticated and do not read credentials. The stdio transport does not use `CONDUIT_S2S_SECRET`.
 
+### Request limits
+
+- HTTP request bodies are capped at 256 KiB (262144 bytes). After the `X-Gateway-S2S` check passes (and, in gateway mode, the `X-Yeastar-*` credential headers are present), a `Content-Length` above the cap returns 413 with a JSON-RPC error; bodies without `Content-Length` are capped by the MCP SDK transport. Unauthenticated requests still get 401 first.
+- `tools/call` arguments are capped at 10,000 elements (every array item and object key at any depth). Larger inputs return a fixed `isError` tool result ("Tool input exceeds the maximum of 10000 elements") that does not echo the tool name, and are never dispatched.
+
+These limits address CVE-2026-111768 / GHSA-46jr-4wx8-v453 (memory exhaustion during validation) and GHSA-f897-62hf-6gxq (no request body / batch cap).
+
 **Every request also passes a mandatory `User-Agent: OpenAPI` header** - Yeastar's API rejects requests missing it (errcode `40002`, "PARAMETER ERROR").
 
 **Defensive field-stripping.** Trunk configuration commonly carries SIP registration secrets (auth/register passwords) inline in the same object a read returns, and Yeastar's schema for these objects isn't machine-verifiable from the docs alone. Every response from every tool in this connector - not just trunk tools - passes through `stripSecretFields()` before it ever reaches the model: any object key matching `/secret|password|pwd/i`, at any depth, is dropped. This is a blanket safety net on top of, not instead of, the endpoint-level exclusions below (`extension/getpassword` and `conference/viewpassword` are never called at all).
